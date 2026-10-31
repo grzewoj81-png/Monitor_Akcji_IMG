@@ -1386,24 +1386,34 @@ bool readRecentLogLines(std::vector<String> &lines, size_t limit) {
   char lineBuffer[MaximumLogLineLength];
   size_t lineLength = 0;
   uint32_t remaining = fileSize;
+  bool readFailed = false;
   while (remaining > 0) {
     const size_t requested = min(static_cast<size_t>(remaining),
                                  sizeof(readBuffer));
+    if (!logFile) {
+      sdLogReadError = "Utracono uchwyt pliku logu";
+      readFailed = true;
+      break;
+    }
     const size_t bytesRead = logFile.read(readBuffer, requested);
-    if (bytesRead == 0 || bytesRead > requested) {
-      sdLogReadError = "Błąd odczytu pozycji " +
-                       String(static_cast<unsigned long>(
-                           logFile.position()));
+    if (bytesRead == 0) {
+      sdLogReadError = "Koniec pliku przed oczekiwaną pozycją";
+      readFailed = true;
+      break;
+    }
+    if (bytesRead > requested) {
+      const size_t filePosition = logFile.position();
+      sdLogReadError =
+          "Błąd odczytu, pozycja " +
+          String(static_cast<unsigned long>(filePosition));
       Serial.printf("Niepełny odczyt logu SD: rozmiar=%lu, pozostało=%lu, "
                     "pozycja=%lu, odczyt=%lu\n",
                     static_cast<unsigned long>(fileSize),
                     static_cast<unsigned long>(remaining),
-                    static_cast<unsigned long>(logFile.position()),
+                    static_cast<unsigned long>(filePosition),
                     static_cast<unsigned long>(bytesRead));
-      logFile.close();
-      SD.end();
-      restoreTouchSpi();
-      return false;
+      readFailed = true;
+      break;
     }
     remaining -= static_cast<uint32_t>(bytesRead);
 
@@ -1437,7 +1447,11 @@ bool readRecentLogLines(std::vector<String> &lines, size_t limit) {
   logFile.close();
   SD.end();
   restoreTouchSpi();
-  return true;
+  if (readFailed && !lines.empty()) {
+    Serial.println("Pokazuję wpisy odczytane przed błędem logu SD");
+    return true;
+  }
+  return !readFailed;
 }
 
 // Odczytuje informacje o karcie i odłącza ją, zanim wznowi obsługę dotyku.
@@ -1792,6 +1806,10 @@ void drawSdLogScreen(bool reload = true) {
   tft.drawString("Wpisy " + String(firstNumber) + "-" +
                      String(pageEnd) + " z " + String(sdLogLines.size()),
                  8, 33, 1);
+  if (!sdLogReadError.isEmpty()) {
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    tft.drawRightString("ODCZYT CZĘŚCIOWY", 312, 33, 1);
+  }
 
   int16_t y = FirstLineY;
   for (size_t entry = sdLogPageStart; entry < pageEnd; ++entry) {

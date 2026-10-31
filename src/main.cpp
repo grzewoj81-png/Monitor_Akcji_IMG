@@ -70,7 +70,7 @@ constexpr int16_t OptionsRowTop = 40;
 constexpr int16_t OptionsRowHeight = 34;
 constexpr int16_t OptionsScrollViewportHeight =
     OptionsVisibleRows * OptionsRowHeight;
-constexpr int16_t OptionsTapSlop = 12;
+constexpr int16_t OptionsTapSlop = 4;
 constexpr uint32_t OptionsScrollFrameIntervalMs = 24;
 constexpr uint8_t TouchCalibrationVersion = 2;
 constexpr size_t SetupPasswordLength = 12;
@@ -403,6 +403,7 @@ uint64_t sdCardUsedBytes = 0;
 String sdCardMessage = "Nie sprawdzono karty";
 std::vector<String> sdLogLines;
 size_t sdLogPageStart = 0;
+String sdLogReadError;
 // Ostatni kurs i historia sesji; zadanie Yahoo używa ich pod ochroną mutexa.
 String stockQuoteStatus = "Czekam na WiFi";
 float stockQuotePrice = 0.0f;
@@ -1347,12 +1348,14 @@ String loadOrCreateSetupPassword() {
 // Czyta plik porcjami i zachowuje tylko najnowsze wpisy w ograniczonym buforze.
 bool readRecentLogLines(std::vector<String> &lines, size_t limit) {
   lines.clear();
+  sdLogReadError = "";
   limit = constrain(limit, static_cast<size_t>(1), static_cast<size_t>(30));
   SD.end();
   SPI.end();
   SPI.begin(SdCardClockPin, SdCardMisoPin, SdCardMosiPin,
             SdCardChipSelectPin);
   if (!SD.begin(SdCardChipSelectPin, SPI, SdCardSpiFrequency)) {
+    sdLogReadError = "Nie można zamontować karty";
     SD.end();
     restoreTouchSpi();
     Serial.println("Nie można odczytać logu: brak dostępnej karty SD/FAT32");
@@ -1369,6 +1372,7 @@ bool readRecentLogLines(std::vector<String> &lines, size_t limit) {
 
   File logFile = SD.open(logPath, FILE_READ);
   if (!logFile) {
+    sdLogReadError = "Nie można otworzyć pliku logu";
     SD.end();
     restoreTouchSpi();
     Serial.println("Nie można otworzyć pliku logu do odczytu");
@@ -1387,6 +1391,9 @@ bool readRecentLogLines(std::vector<String> &lines, size_t limit) {
                                  sizeof(readBuffer));
     const size_t bytesRead = logFile.read(readBuffer, requested);
     if (bytesRead == 0 || bytesRead > requested) {
+      sdLogReadError = "Błąd odczytu pozycji " +
+                       String(static_cast<unsigned long>(
+                           logFile.position()));
       Serial.printf("Niepełny odczyt logu SD: rozmiar=%lu, pozostało=%lu, "
                     "pozycja=%lu, odczyt=%lu\n",
                     static_cast<unsigned long>(fileSize),
@@ -1751,8 +1758,13 @@ void drawSdLogScreen(bool reload = true) {
       sdLogLines.clear();
       tft.fillRect(0, 32, ScreenWidth, ScreenHeight - 32, TFT_BLACK);
       tft.setTextColor(TFT_RED, TFT_BLACK);
-      tft.drawCentreString("Nie można odczytać logu SD",
-                           ScreenWidth / 2, 105, 2);
+      if (!sdCardFilesystemMounted) {
+        sdLogReadError = "Karta/FAT32 nie jest zamontowana";
+      }
+      tft.drawCentreString("Błąd odczytu logu SD", ScreenWidth / 2, 86, 2);
+      tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+      tft.drawCentreString(sdLogReadError, ScreenWidth / 2, 112, 1);
+      Serial.println("Podgląd logu SD: " + sdLogReadError);
       return;
     }
     constexpr size_t EntriesPerPage = 15;
@@ -2845,8 +2857,9 @@ void handleWebSdLog() {
   if (!requireWebAuth()) return;
   std::vector<String> lines;
   if (!readRecentLogLines(lines, 30)) {
-    webServer.send(503, "application/json",
-                   "{\"message\":\"Nie można odczytać logu z karty SD\"}");
+    webServer.send(
+        503, "application/json",
+        "{\"message\":\"" + jsonEscape(sdLogReadError) + "\"}");
     return;
   }
 
@@ -3529,8 +3542,10 @@ void handleTouch() {
 
   if (currentScreen == Screen::Options) {
     if (down) {
-      if (!optionsTouchActive && !touchWasDown &&
-          millis() - lastTouchAt > 250) {
+      if (!optionsTouchActive && !touchWasDown) {
+        if (millis() - lastTouchAt <= 250) {
+          return;
+        }
         const TS_Point point = touch.getPoint();
         optionsTouchStartX = static_cast<uint16_t>(constrain(
             map(point.x, touchXLeft, touchXRight, CalibrationScreenLeft,
@@ -3570,7 +3585,7 @@ void handleTouch() {
             optionsTouchStartY <
                 OptionsRowTop + OptionsScrollViewportHeight) {
           const int16_t movement = optionsTouchLastY - currentY;
-          if (abs(currentY - optionsTouchStartY) > OptionsTapSlop) {
+          if (abs(currentY - optionsTouchStartY) >= OptionsTapSlop) {
             optionsTouchMoved = true;
             if (optionsPressedItem >= 0) {
               optionsPressedItem = -1;

@@ -1344,7 +1344,7 @@ String loadOrCreateSetupPassword() {
   return password;
 }
 
-// Czyta porcjami końcówkę pliku, aby uniknąć dużego bufora i krótkich odczytów.
+// Czyta plik porcjami i zachowuje tylko najnowsze wpisy w ograniczonym buforze.
 bool readRecentLogLines(std::vector<String> &lines, size_t limit) {
   lines.clear();
   limit = constrain(limit, static_cast<size_t>(1), static_cast<size_t>(30));
@@ -1375,53 +1375,33 @@ bool readRecentLogLines(std::vector<String> &lines, size_t limit) {
     return false;
   }
 
-  constexpr size_t TailReadSize = 8192;
   constexpr size_t ReadChunkSize = 512;
   constexpr size_t MaximumLogLineLength = 192;
   const uint32_t fileSize = logFile.size();
-  const size_t readSize = min(static_cast<size_t>(fileSize), TailReadSize);
-  if (readSize == 0) {
-    logFile.close();
-    SD.end();
-    restoreTouchSpi();
-    return true;
-  }
-  const uint32_t readStart = fileSize - readSize;
-  if (!logFile.seek(readStart)) {
-    logFile.close();
-    SD.end();
-    restoreTouchSpi();
-    Serial.println("Nie można ustawić pozycji odczytu logu SD");
-    return false;
-  }
-
   uint8_t readBuffer[ReadChunkSize];
   char lineBuffer[MaximumLogLineLength];
   size_t lineLength = 0;
-  bool skipPartialLine = readStart > 0;
-  uint32_t remaining = static_cast<uint32_t>(readSize);
+  uint32_t remaining = fileSize;
   while (remaining > 0) {
     const size_t requested = min(static_cast<size_t>(remaining),
                                  sizeof(readBuffer));
     const size_t bytesRead = logFile.read(readBuffer, requested);
     if (bytesRead == 0 || bytesRead > requested) {
+      Serial.printf("Niepełny odczyt logu SD: rozmiar=%lu, pozostało=%lu, "
+                    "pozycja=%lu, odczyt=%lu\n",
+                    static_cast<unsigned long>(fileSize),
+                    static_cast<unsigned long>(remaining),
+                    static_cast<unsigned long>(logFile.position()),
+                    static_cast<unsigned long>(bytesRead));
       logFile.close();
       SD.end();
       restoreTouchSpi();
-      Serial.println("Niepełny odczyt końcówki pliku logu SD");
       return false;
     }
     remaining -= static_cast<uint32_t>(bytesRead);
 
     for (size_t i = 0; i < bytesRead; ++i) {
       const char value = static_cast<char>(readBuffer[i]);
-      if (skipPartialLine) {
-        if (value == '\n') {
-          skipPartialLine = false;
-        }
-        continue;
-      }
-
       if (value == '\n') {
         if (lineLength > 0 && lineBuffer[lineLength - 1] == '\r') {
           --lineLength;
@@ -3567,7 +3547,8 @@ void handleTouch() {
         optionsScrollVelocity = 0.0f;
         optionsPressedItem = -1;
         optionsTouchActive = true;
-        if (optionsTouchStartY >= OptionsRowTop &&
+        if (optionsTouchStartX >= 250 &&
+            optionsTouchStartY >= OptionsRowTop &&
             optionsTouchStartY <
                 OptionsRowTop + OptionsScrollViewportHeight) {
           const size_t item = static_cast<size_t>(
@@ -3629,8 +3610,9 @@ void handleTouch() {
           drawOptionsContent();
           optionsLastRenderAt = millis();
         }
-      } else if (optionsPressedItem < 0 ||
-                 (optionsTouchLastY >= OptionsRowTop &&
+      } else if (optionsTouchStartY < OptionsRowTop ||
+                 (optionsTouchStartX >= 250 && optionsPressedItem >= 0 &&
+                  optionsTouchLastY >= OptionsRowTop &&
                   optionsTouchLastY <
                       OptionsRowTop + OptionsScrollViewportHeight &&
                   static_cast<size_t>(
